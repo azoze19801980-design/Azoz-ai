@@ -1,15 +1,18 @@
-# [Project name]
+# AZOZ AI Pro
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+بوت Telegram عربي لتحليل أزواج الفوركس وصور الشارت عبر Groq، مع فحص سوق وإشارات فنية دورية.
 
 ## Run & Operate
 
 - `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
+- `python -m telegram_bot.bot` — run the AZOZ AI Pro Telegram bot
+- `pip install -r requirements.txt` — install bot dependencies
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - Required env: `DATABASE_URL` — Postgres connection string
+- Bot secrets: `TELEGRAM_BOT_TOKEN`, `GROQ_API_KEY`
 
 ## Stack
 
@@ -22,23 +25,28 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `telegram_bot/` — Telegram bot, Groq vision/chat, Yahoo Finance market analysis, and subscriber persistence
+- `requirements.txt` — Python bot dependencies
+- `lib/api-spec/openapi.yaml` — API contract source of truth
+- `lib/db/src/schema/` — database schema
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Yahoo Finance spot-FX rates are not Quotex OTC quotes; the bot does not label them OTC.
+- The displayed 78–93% is a technical-confluence score, not a historically validated win rate.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+Users can scan supported spot-FX pairs, submit chart images for Groq Vision analysis, chat in Arabic about technical/fundamental analysis, and subscribe to recurring signals.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Keep Telegram and Groq credentials in Replit Secrets, never in source files.
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Yahoo can return fewer than 100 one-minute candles; market analysis intentionally requires at least 25.
+- Telegram signals use Yahoo spot-FX data, not Quotex OTC data, and are not guarantees of profit.
 
 ## Pointers
 

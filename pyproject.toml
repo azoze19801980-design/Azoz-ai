@@ -1,0 +1,11 @@
+[project]
+name = "repl-nix-workspace"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.11"
+dependencies = [
+    "groq>=1.7.0",
+    "pillow>=12.3.0",
+    "pytelegrambotapi>=4.37.0",
+    "yfinance>=1.7.0",
+]

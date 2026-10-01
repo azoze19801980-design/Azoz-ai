@@ -47,3 +47,11 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Python bot
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+telegram_bot/subscribers.json
+telegram_bot/subscribers.tmp
