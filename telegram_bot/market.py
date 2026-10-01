@@ -267,7 +267,7 @@ def format_signal(signal: MarketSignal) -> str:
         f"📈 الفرصة: {direction_ar} {icon}\n"
         f"⏰ وقت الدخول: الآن {signal.observed_at:%H:%M}\n"
         f"⏳ مدة الصفقة: 1 دقيقة\n"
-        f"🎯 نسبة النجاح: {signal.confidence}%\n"
+        f"🎯 توافق المؤشرات: {signal.confidence}%\n"
         f"قوة الاشارة: {signal.strength}"
     )
 

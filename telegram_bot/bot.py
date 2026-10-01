@@ -204,7 +204,7 @@ def _format_chart_result(result: dict[str, Any]) -> tuple[str, str]:
         f"📈 الفرصة: {direction_ar} {icon}\n"
         f"⏰ وقت الدخول: الآن {now}\n"
         f"⏳ مدة الصفقة: 1 دقيقة\n"
-        f"🎯 نسبة النجاح: {result['confidence']}%\n"
+        f"🎯 توافق المؤشرات: {result['confidence']}%\n"
         f"قوة الاشارة: {result['strength']}"
     )
     explanation = (
