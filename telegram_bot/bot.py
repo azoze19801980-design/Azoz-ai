@@ -13,7 +13,17 @@ from zoneinfo import ZoneInfo
 import telebot
 from telebot import types
 
-from telegram_bot.ai import analyze_chart_image, chat_reply
+from telegram_bot.ai import analyze_chart_image, analyze_currency_impact, chat_reply
+from telegram_bot.economic_news import (
+    CalendarEvent,
+    OfficialStory,
+    affected_pairs,
+    arabic_direction,
+    due_alert_window,
+    fetch_official_news,
+    fetch_upcoming_events,
+    pair_direction,
+)
 from telegram_bot.market import (
     analyze_pair_from_message,
     format_confidence_notice,
@@ -21,7 +31,14 @@ from telegram_bot.market import (
     format_signal,
     scan_market,
 )
-from telegram_bot.storage import load_subscribers, save_subscribers
+from telegram_bot.storage import (
+    load_news_state,
+    load_news_subscribers,
+    load_subscribers,
+    save_news_state,
+    save_news_subscribers,
+    save_subscribers,
+)
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -36,15 +53,22 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=8)
 subscribers = load_subscribers()
 subscribers_lock = threading.Lock()
+news_subscribers = load_news_subscribers()
+news_subscribers_lock = threading.Lock()
+news_state = load_news_state()
+news_state_lock = threading.RLock()
 state_lock = threading.Lock()
 waiting_for_chart: set[int] = set()
 chat_history: dict[int, list[dict[str, str]]] = {}
 auto_signal_interval = 180
+news_check_interval = 30
 
 BTN_MARKET = "🔍 فحص السوق"
 BTN_CHART = "📷 تحليل صورة شارت"
 BTN_AUTO_ON = "⚡ تفعيل الاشارات المباشرة"
 BTN_AUTO_OFF = "⛔ ايقاف الاشارات"
+BTN_NEWS_ON = "🗞️ تفعيل تنبيهات الأخبار"
+BTN_NEWS_OFF = "🔕 إيقاف تنبيهات الأخبار"
 BTN_AI_CHAT = "🤖 محادثة مع الذكاء الاصطناعي"
 
 
@@ -52,6 +76,7 @@ def main_keyboard() -> types.ReplyKeyboardMarkup:
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     keyboard.row(types.KeyboardButton(BTN_MARKET), types.KeyboardButton(BTN_CHART))
     keyboard.row(types.KeyboardButton(BTN_AUTO_ON), types.KeyboardButton(BTN_AUTO_OFF))
+    keyboard.row(types.KeyboardButton(BTN_NEWS_ON), types.KeyboardButton(BTN_NEWS_OFF))
     keyboard.row(types.KeyboardButton(BTN_AI_CHAT))
     return keyboard
 
@@ -100,6 +125,205 @@ def _signal_scheduler() -> None:
             logger.error("Automatic market scan failed (%s)", type(exc).__name__)
 
 
+def _impact_for_message(
+    key: str,
+    currency: str,
+    title: str,
+    details: str,
+    scheduled_only: bool,
+) -> dict[str, str]:
+    with news_state_lock:
+        cached = news_state["outlooks"].get(key)
+        if isinstance(cached, dict):
+            return {str(name): str(value) for name, value in cached.items()}
+
+    try:
+        impact = analyze_currency_impact(
+            currency=currency,
+            title=title,
+            details=details,
+            scheduled_only=scheduled_only,
+        )
+    except Exception as exc:
+        logger.warning("Economic-news analysis unavailable (%s)", type(exc).__name__)
+        impact = {
+            "currency_bias": "UNCERTAIN",
+            "rationale": "لم تتوفر قراءة آلية موثوقة؛ لا يمكن تحديد اتجاه واحد.",
+            "supportive_scenario": "إذا جاءت القراءة أقوى من توقعات السوق فقد تقوى العملة.",
+            "negative_scenario": "إذا جاءت القراءة أضعف من التوقعات فقد تضعف العملة.",
+        }
+
+    with news_state_lock:
+        outlooks = news_state["outlooks"]
+        if isinstance(outlooks, dict):
+            existing = outlooks.setdefault(key, impact)
+            impact = {str(name): str(value) for name, value in existing.items()}
+            save_news_state(news_state)
+    return impact
+
+
+def _format_currency_outlook(
+    currency: str,
+    pairs: list[str],
+    impact: dict[str, str],
+    scheduled_only: bool,
+) -> str:
+    bias = impact.get("currency_bias", "UNCERTAIN").upper()
+    bias_ar = {
+        "STRONGER": f"ميل أولي إلى قوة {currency}",
+        "WEAKER": f"ميل أولي إلى ضعف {currency}",
+        "UNCERTAIN": "غير محسوم قبل صدور البيانات",
+    }.get(bias, "غير محسوم قبل صدور البيانات")
+    lines = [f"🤖 التقدير الاحتمالي: {bias_ar}."]
+    if pairs:
+        if bias in {"STRONGER", "WEAKER"}:
+            lines.append(
+                "اتجاه الأزواج المتأثرة: "
+                + "، ".join(
+                    f"{pair} {arabic_direction(pair_direction(pair, currency, bias))}"
+                    for pair in pairs
+                )
+                + "."
+            )
+        else:
+            scenarios: list[str] = []
+            for pair in pairs:
+                stronger = arabic_direction(pair_direction(pair, currency, "STRONGER"))
+                weaker = arabic_direction(pair_direction(pair, currency, "WEAKER"))
+                scenarios.append(f"{pair}: {stronger} إذا قويت {currency} / {weaker} إذا ضعفت")
+            lines.append("سيناريوهات الزوج: " + "؛ ".join(scenarios) + ".")
+
+    rationale = impact.get("rationale", "").strip()
+    if rationale:
+        lines.append(f"السبب: {rationale}")
+    supportive = impact.get("supportive_scenario", "").strip()
+    negative = impact.get("negative_scenario", "").strip()
+    if bias == "UNCERTAIN" and (supportive or negative):
+        if supportive:
+            lines.append(f"سيناريو داعم: {supportive}")
+        if negative:
+            lines.append(f"سيناريو معاكس: {negative}")
+    if scheduled_only:
+        lines.append("المصدر المجاني يعرض الموعد فقط، ولا يوفر إجماع السوق أو قراءة فعلية مسبقة.")
+    else:
+        lines.append("قد لا يتضمن الموجز مقارنة بتوقعات السوق؛ مفاجأة الخبر هي ما يحرك السعر غالبًا.")
+    return "\n".join(lines)
+
+
+def _format_event_alert(event: CalendarEvent, window: str, impact: dict[str, str]) -> str:
+    minutes = "30 دقيقة" if window == "30m" else "5 دقائق"
+    pairs = affected_pairs(event.currency)
+    return (
+        f"📅 تنبيه قبل خبر اقتصادي — قبل {minutes}\n"
+        f"الحدث: {event.title}\n"
+        f"العملة: {event.currency}\n"
+        f"الوقت بتوقيت إسطنبول: {event.scheduled_at:%Y-%m-%d %H:%M}\n"
+        f"الأزواج المحتمل تأثرها: {', '.join(pairs) or 'غير محددة'}\n\n"
+        f"{_format_currency_outlook(event.currency, pairs, impact, scheduled_only=True)}\n\n"
+        f"المصدر والجدول: {event.source_url}\n"
+        "تنبيه تعليمي فقط؛ لا يضمن اتجاه السوق أو نتيجة صفقة."
+    )
+
+
+def _format_story_alert(story: OfficialStory, impact: dict[str, str]) -> str:
+    pairs = affected_pairs(story.currency)
+    summary = f"\nالخلاصة الرسمية: {story.summary}" if story.summary else ""
+    link = f"\nالرابط: {story.link}" if story.link else ""
+    return (
+        f"📰 خبر اقتصادي رسمي مؤثر\n"
+        f"المصدر: {story.source}\n"
+        f"العنوان: {story.title}"
+        f"{summary}\n"
+        f"العملة: {story.currency} | الأزواج: {', '.join(pairs) or 'غير محددة'}\n\n"
+        f"{_format_currency_outlook(story.currency, pairs, impact, scheduled_only=False)}"
+        f"{link}\n"
+        "تحليل احتمالي تعليمي، وليس توصية تداول أو ضمانًا."
+    )
+
+
+def _send_news_message(chat_id: int, delivery_key: str, text: str) -> None:
+    stored_key = f"{chat_id}:{delivery_key}"
+    with news_state_lock:
+        delivered = news_state["delivered"]
+        if not isinstance(delivered, set) or stored_key in delivered:
+            return
+    try:
+        bot.send_message(chat_id, text, disable_web_page_preview=True)
+    except Exception as exc:
+        logger.warning("Economic-news delivery failed (%s)", type(exc).__name__)
+        return
+    with news_state_lock:
+        delivered = news_state["delivered"]
+        if isinstance(delivered, set):
+            delivered.add(stored_key)
+            save_news_state(news_state)
+
+
+def _broadcast_event(event: CalendarEvent, window: str, recipients: tuple[int, ...]) -> None:
+    impact = _impact_for_message(
+        key=event.key,
+        currency=event.currency,
+        title=event.title,
+        details="",
+        scheduled_only=True,
+    )
+    message = _format_event_alert(event, window, impact)
+    for chat_id in recipients:
+        _send_news_message(chat_id, f"{event.key}:{window}", message)
+
+
+def _broadcast_story(story: OfficialStory, recipients: tuple[int, ...]) -> None:
+    impact = _impact_for_message(
+        key=story.key,
+        currency=story.currency,
+        title=story.title,
+        details=story.summary,
+        scheduled_only=False,
+    )
+    message = _format_story_alert(story, impact)
+    for chat_id in recipients:
+        _send_news_message(chat_id, story.key, message)
+
+
+def _economic_news_scheduler() -> None:
+    cached_events: list[CalendarEvent] = []
+    next_calendar_fetch = 0.0
+    next_news_fetch = 0.0
+    while True:
+        with news_subscribers_lock:
+            recipient_ids = tuple(news_subscribers)
+        if not recipient_ids:
+            time.sleep(news_check_interval)
+            continue
+
+        now = datetime.now(ZoneInfo("Europe/Istanbul"))
+        monotonic_now = time.monotonic()
+        if monotonic_now >= next_calendar_fetch:
+            try:
+                cached_events = fetch_upcoming_events(now=now)
+                logger.info("Economic calendar refreshed (%s events).", len(cached_events))
+                next_calendar_fetch = monotonic_now + 900
+            except Exception as exc:
+                logger.warning("Economic calendar refresh failed (%s)", type(exc).__name__)
+                next_calendar_fetch = monotonic_now + 120
+
+        if monotonic_now >= next_news_fetch:
+            try:
+                stories = fetch_official_news(now=now)
+                for story in stories:
+                    _broadcast_story(story, recipient_ids)
+                next_news_fetch = monotonic_now + 180
+            except Exception as exc:
+                logger.warning("Official news refresh failed (%s)", type(exc).__name__)
+                next_news_fetch = monotonic_now + 120
+
+        for event in cached_events:
+            window = due_alert_window(event.scheduled_at, now=now)
+            if window:
+                _broadcast_event(event, window, recipient_ids)
+        time.sleep(news_check_interval)
+
+
 def _set_subscriber(chat_id: int, enabled: bool) -> None:
     with subscribers_lock:
         if enabled:
@@ -107,6 +331,15 @@ def _set_subscriber(chat_id: int, enabled: bool) -> None:
         else:
             subscribers.discard(chat_id)
         save_subscribers(subscribers)
+
+
+def _set_news_subscriber(chat_id: int, enabled: bool) -> None:
+    with news_subscribers_lock:
+        if enabled:
+            news_subscribers.add(chat_id)
+        else:
+            news_subscribers.discard(chat_id)
+        save_news_subscribers(news_subscribers)
 
 
 @bot.message_handler(commands=["start", "help"])
@@ -118,7 +351,8 @@ def start(message: types.Message) -> None:
     intro = (
         "أهلًا بك في AZOZ AI Pro، مساعدك لتحليل الفوركس بإشراف المطور عزوز.\n\n"
         "اختر فحص السوق للحصول على أفضل 3 قراءات فنية عند توفر البيانات، أو أرسل "
-        "صورة شارت لتحليلها عبر Groq Vision، أو ابدأ محادثة متخصصة.\n\n"
+        "صورة شارت لتحليلها عبر Groq Vision، أو ابدأ محادثة متخصصة. "
+        "يمكنك تفعيل تنبيهات الأخبار الاقتصادية عبر /news_on.\n\n"
         "بيانات السوق من Yahoo Finance هي أسعار فوركس فورية استرشادية وليست "
         "أسعار Quotex OTC. نسبة الإشارة هي توافق فني وليست نسبة ربح مثبتة أو ضمانًا. "
         "التحليل تعليمي وقد تخسر رأس المال."
@@ -143,6 +377,29 @@ def auto_off(message: types.Message) -> None:
     bot.send_message(
         message.chat.id,
         "تم إيقاف الإشارات المباشرة.",
+        reply_markup=main_keyboard(),
+    )
+
+
+@bot.message_handler(commands=["news_on"])
+def news_on(message: types.Message) -> None:
+    _set_news_subscriber(message.chat.id, True)
+    bot.send_message(
+        message.chat.id,
+        "تم تفعيل تنبيهات الأخبار الرسمية. سأرسل إشعارًا قبل بعض الإصدارات "
+        "الاقتصادية المهمة بنحو 30 و5 دقائق، إضافة إلى الأخبار الرسمية المؤثرة "
+        "عند نشرها. التقدير احتمالي ومشروط؛ المصادر المجانية لا توفر إجماع السوق "
+        "لكل حدث، لذلك قد يكون الاتجاه «غير محسوم». أوقفها عبر /news_off.",
+        reply_markup=main_keyboard(),
+    )
+
+
+@bot.message_handler(commands=["news_off"])
+def news_off(message: types.Message) -> None:
+    _set_news_subscriber(message.chat.id, False)
+    bot.send_message(
+        message.chat.id,
+        "تم إيقاف تنبيهات الأخبار الاقتصادية.",
         reply_markup=main_keyboard(),
     )
 
@@ -184,6 +441,16 @@ def auto_on_button(message: types.Message) -> None:
 @bot.message_handler(func=lambda message: message.text == BTN_AUTO_OFF, content_types=["text"])
 def auto_off_button(message: types.Message) -> None:
     auto_off(message)
+
+
+@bot.message_handler(func=lambda message: message.text == BTN_NEWS_ON, content_types=["text"])
+def news_on_button(message: types.Message) -> None:
+    news_on(message)
+
+
+@bot.message_handler(func=lambda message: message.text == BTN_NEWS_OFF, content_types=["text"])
+def news_off_button(message: types.Message) -> None:
+    news_off(message)
 
 
 @bot.message_handler(func=lambda message: message.text == BTN_AI_CHAT, content_types=["text"])
@@ -253,7 +520,7 @@ def text_message(message: types.Message) -> None:
     if not text or text.startswith("/"):
         return
     chat_id = message.chat.id
-    if text == BTN_MARKET or text == BTN_CHART:
+    if text in {BTN_MARKET, BTN_CHART, BTN_AUTO_ON, BTN_AUTO_OFF, BTN_NEWS_ON, BTN_NEWS_OFF, BTN_AI_CHAT}:
         return
     try:
         signal = analyze_pair_from_message(text)
@@ -296,6 +563,12 @@ def main() -> None:
         daemon=True,
     )
     scheduler.start()
+    news_scheduler = threading.Thread(
+        target=_economic_news_scheduler,
+        name="azoz-economic-news-scheduler",
+        daemon=True,
+    )
+    news_scheduler.start()
     logger.info("AZOZ AI Pro is starting Telegram polling.")
     bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
 

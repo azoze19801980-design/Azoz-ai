@@ -55,3 +55,7 @@ __pycache__/
 venv/
 telegram_bot/subscribers.json
 telegram_bot/subscribers.tmp
+telegram_bot/news_subscribers.json
+telegram_bot/news_subscribers.tmp
+telegram_bot/news_state.json
+telegram_bot/news_state.tmp

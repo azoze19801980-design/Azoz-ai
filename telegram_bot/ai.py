@@ -70,6 +70,67 @@ def chat_reply(
     return _content(response)[:3500]
 
 
+def analyze_currency_impact(
+    *,
+    currency: str,
+    title: str,
+    details: str = "",
+    scheduled_only: bool = False,
+) -> dict[str, str]:
+    """Estimate a cautious currency bias from only the official text provided."""
+    source_limit = (
+        "المتاح قبل الحدث هو الاسم والموعد فقط، ولا توجد توقعات إجماع أو أرقام فعلية."
+        if scheduled_only
+        else "حلّل العنوان والملخص الرسميين فقط؛ لا توجد بالضرورة مقارنة بتوقعات الإجماع."
+    )
+    prompt = (
+        f"العملة محل التقييم: {currency}\n"
+        f"الحدث أو الخبر الرسمي: {title[:500]}\n"
+        f"الملخص المتاح: {details[:1200] or 'لا يوجد ملخص إضافي'}\n"
+        f"حدود المصدر: {source_limit}\n\n"
+        "أعد JSON صالحًا فقط بهذه المفاتيح: currency_bias (STRONGER أو WEAKER أو UNCERTAIN)، "
+        "rationale (جملة عربية قصيرة)، supportive_scenario (متى قد تقوى العملة)، "
+        "negative_scenario (متى قد تضعف العملة). لا تخترع نتيجة أو توقعًا أو مفاجأة "
+        "اقتصادية. إذا لم تتوفر أرقام أو مقارنة موثوقة، اجعل currency_bias=UNCERTAIN "
+        "واكتب سيناريوهين مشروطين بدل تخمين اتجاه حتمي. لا تذكر احتمالًا رقميًا ولا "
+        "تقدم نصيحة دخول."
+    )
+    response = _get_client().chat.completions.create(
+        model=MODEL_ID,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "أنت محلل أساسي حذر. اعتمد حصريًا على النص الذي يمرره المستخدم. "
+                    "لا تدّعِ امتلاك توقعات سوقية أو أسعار حية أو معرفة بخبر لم يُذكر."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.1,
+        max_completion_tokens=400,
+        response_format={"type": "json_object"},
+    )
+    try:
+        result = json.loads(_content(response))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("تعذّر فهم تحليل الخبر من النموذج.") from exc
+
+    bias = str(result.get("currency_bias", "UNCERTAIN")).upper()
+    if bias not in {"STRONGER", "WEAKER", "UNCERTAIN"}:
+        bias = "UNCERTAIN"
+    return {
+        "currency_bias": bias,
+        "rationale": str(result.get("rationale", "المعلومات المتاحة لا تكفي لتحديد ميل موثوق."))[:350],
+        "supportive_scenario": str(
+            result.get("supportive_scenario", "إذا جاء الخبر داعمًا للعملة مقارنة بتوقعات السوق.")
+        )[:300],
+        "negative_scenario": str(
+            result.get("negative_scenario", "إذا جاء الخبر أضعف من توقعات السوق أو اتجه البنك المركزي للتيسير.")
+        )[:300],
+    }
+
+
 def _prepare_image(image_bytes: bytes) -> tuple[str, str]:
     if not image_bytes or len(image_bytes) > MAX_TELEGRAM_IMAGE_BYTES:
         raise ValueError("حجم الصورة كبير أو فارغ. أرسل صورة أقل من 12 ميغابايت.")

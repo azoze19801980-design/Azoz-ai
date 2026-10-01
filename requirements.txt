@@ -2,3 +2,5 @@ pyTelegramBotAPI>=4.29
 groq>=0.31
 yfinance>=0.2.54
 Pillow>=10.0
+beautifulsoup4
+requests
